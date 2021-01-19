@@ -235,7 +235,7 @@ form <- y ~ 0 + a0 +
     model = "rw2",
     scale.model = T,
     hyper = list(theta = list(prior="pc.prec",
-                              param=c(10, 0.01)))) + 
+                              param=c(1, 0.01)))) + 
   f(s,
     model = barrier.model,
     group = s.group,
@@ -245,7 +245,7 @@ form <- y ~ 0 + a0 +
 
 ### Fit the model
 
-NB. This takes around 4 hours on a 2.7 GHz Intel i5 with 16GB RAM
+NB. This takes around 2.5 hours on a 2.7 GHz Intel i5 with 16GB RAM
 
 ``` r
 # fit the model
