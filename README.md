@@ -1,0 +1,255 @@
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+[![Project Status: WIP – Initial development is in progress, but there
+has not yet been a stable, usable release suitable for the
+public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+
+harpINLA
+========
+
+**harpINLA** is an example repo for fitting a spatio-temporal log
+Gaussian Cox Process model to animal telemetry data using R-INLA and
+follows the “going off grid” approach outlined in Simpson et al. 2016
+<a href="https://doi.org/10.1093/biomet/asv064" class="uri">https://doi.org/10.1093/biomet/asv064</a>.
+
+To address issues with approximation across land boundaries, the spatial
+mesh is defined using the Bakka Barrier model:
+<a href="https://doi.org/10.1016/j.spasta.2019.01.002" class="uri">https://doi.org/10.1016/j.spasta.2019.01.002</a>
+
+All the data objects required for the analysis are in the `/data` folder
+
+Example code to run analysis
+----------------------------
+
+### Load libraries and import data
+
+``` r
+# Load libraries
+require(INLA)
+require(inlabru)
+require(tidyverse)
+require(sf)
+require(viridis)
+require(raster)
+require(rgeos)
+
+# Load data from repo
+dat <- readRDS("data/harps2500_indexed.rds") # random subsample of animal locations
+land <- readRDS("data/land_sf.rds") # land shapefile - mainly for plotting
+bound <- readRDS("data/boundary.rds") # boundary of the region for the INLA barrier model
+mesh <- readRDS("data/mesh.rds") # INLA mesh
+dmesh <- readRDS("data/dmesh.rds") # dmesh containing the Voroni polygons
+mesh_ice <- readRDS("data/mesh_ice.rds") # environmental covariate values for the dmesh
+
+# Define an Albers equal area projection using kilometres as units
+prj = "+proj=laea +lat_0=75 +lon_0=-25 +x_0=0 +y_0=0 +units=km +no_defs +ellps=WGS84"
+```
+
+### Define the barrier model
+
+``` r
+# Set up boundary matern model
+tl = length(mesh$graph$tv[,1]) # the number of triangles in the mesh
+
+# Compute triangle positions
+posTri = matrix(0, tl, 2) 
+for (t in 1:tl){
+  temp = mesh$loc[mesh$graph$tv[t, ], ]
+  posTri[t,] = colMeans(temp)[c(1,2)] 
+}
+posTri = SpatialPoints(posTri, proj4string = CRS(prj))
+
+normal = unlist(over(bound, posTri, returnList = T)) # check which mesh triangles are inside the normal area
+barrier.triangles = setdiff(1:tl, normal)
+poly.barrier = inla.barrier.polygon(mesh, barrier.triangles)
+
+# create the matern object
+barrier.model = inla.barrier.pcmatern(mesh,
+                                      barrier.triangles = barrier.triangles,
+                                      prior.range = c(50, .1),
+                                      prior.sigma = c(10, 0.01))
+```
+
+### Define the time mesh for the annual migration
+
+``` r
+# Create a 1d time mesh for the annual cycle
+tmesh <- inla.mesh.1d(loc = 1:4, boundary = "free") # boundary needs to be changed to 'cyclic' but this increases computation time
+k <- length(tmesh$loc) # number of time periods
+
+# number of time groups (4 seasons)
+idx <- inla.spde.make.index(name = 's',
+                            n.spde = barrier.model$f$n,
+                            n.group = 4)
+```
+
+### Define exposure for the LGCP model
+
+``` r
+# Calculate weights for each polygon in the dmesh based on polygon area
+# Set weights to 0 when polygon is outside study area
+
+w <- sapply(1:length(dmesh), function(i){
+  if(gIntersects(dmesh[i,], bound))
+    return(gArea(gIntersection(dmesh[i,], bound)))
+  else return(0)
+})
+
+# Exposure for LGCP is the weights of the dmesh replicated by the number of seasons in the time mesh
+st.vol <- rep(w, k)
+```
+
+### Format space-time sea ice covariate
+
+Distribution of animals is in part driven by sea ice concentration. This
+can be included as a smooth term in the model.
+
+However, the location data come from different time periods (1990s,
+2000s, 2010s) - with different sea ice conditions.
+
+The seasonal sea ice data for each season and each time period
+associated with each Voroni polygon is contained in `mesh_ice`.
+
+Format ice data into a vector ready to add to a INLA stack for each time
+period.
+
+``` r
+# format for the stack will be the covariate at each polygon for each time point in the 1d mesh
+# append the covariate for the location to the end of the vector
+# repeat for each stack - labelled 1,2,3,5 as we have no location data for time period 4
+ice_1 <- c(mesh_ice[,1], mesh_ice[,2], mesh_ice[,3], mesh_ice[,4], dat$ice[dat$year_i == 1]) # seasonal ice and add location ice
+ice_2 <- c(mesh_ice[,5], mesh_ice[,6], mesh_ice[,7], mesh_ice[,8], dat$ice[dat$year_i == 2])
+ice_3 <- c(mesh_ice[,9], mesh_ice[,10], mesh_ice[,11], mesh_ice[,12], dat$ice[dat$year_i == 3])
+ice_5 <- c(mesh_ice[,17], mesh_ice[,18], mesh_ice[,19], mesh_ice[,20], dat$ice[dat$year_i == 5])
+```
+
+### Create INLA stacks
+
+``` r
+# Stack 1
+# Create A matrix with space and time indexing
+Ast_1 <- inla.spde.make.A(mesh = mesh,
+                          loc = cbind(dat$x[dat$year_i == 1], dat$y[dat$year_i == 1]),
+                          group = dat$season[dat$year_i == 1],
+                          n.group = k,
+                          group.mesh = tmesh)
+
+n <- nrow(dat[dat$year_i == 1,]) # number of locations
+m <- barrier.model$f$n # number of mesh nodes
+
+y <- rep(0:1, c(k * m, n))
+expected <- c(st.vol, rep(0, n)) # this is specific to the number of locations in each time point
+
+stk_1 <- inla.stack(
+  data = list(y = y,
+              expect = expected), 
+  A = list(rbind(Diagonal(n = k * m), Ast_1), 1), 
+  effects = list(idx,
+                 list(a0 = rep(1, (k * m) + n),
+                      ice = ice_1)))
+
+# Stack 2
+# Create A matrix with space and time indexing
+Ast_2 <- inla.spde.make.A(mesh = mesh,
+                          loc = cbind(dat$x[dat$year_i == 2], dat$y[dat$year_i == 2]),
+                          group = dat$season[dat$year_i == 2],
+                          n.group = k,
+                          group.mesh = tmesh)
+
+n <- nrow(dat[dat$year_i == 2,]) # number of locations
+m <- barrier.model$f$n # number of mesh nodes
+
+y <- rep(0:1, c(k * m, n))
+expected <- c(st.vol, rep(0, n))
+
+stk_2 <- inla.stack(
+  data = list(y = y,
+              expect = expected), 
+  A = list(rbind(Diagonal(n = k * m), Ast_2), 1), 
+  effects = list(idx,
+                 list(a0 = rep(1, (k * m) + n),
+                      ice = ice_2)))
+
+# Stack 3
+# Create A matrix with space and time indexing
+Ast_3 <- inla.spde.make.A(mesh = mesh,
+                          loc = cbind(dat$x[dat$year_i == 3], dat$y[dat$year_i == 3]),
+                          group = dat$season[dat$year_i == 3],
+                          n.group = k,
+                          group.mesh = tmesh)
+
+# Create lgcp stack
+n <- nrow(dat[dat$year_i == 3,]) # number of locations
+m <- barrier.model$f$n # number of mesh nodes
+
+y <- rep(0:1, c(k * m, n))
+expected <- c(st.vol, rep(0, n))
+
+stk_3 <- inla.stack(
+  data = list(y = y,
+              expect = expected), 
+  A = list(rbind(Diagonal(n = k * m), Ast_3), 1), 
+  effects = list(idx,
+                 list(a0 = rep(1, (k * m) + n),
+                      ice = ice_3)))
+
+# Stack 5
+# Create A matrix with space and time indexing
+Ast_5 <- inla.spde.make.A(mesh = mesh,
+                          loc = cbind(dat$x[dat$year_i == 5], dat$y[dat$year_i == 5]),
+                          group = dat$season[dat$year_i == 5],
+                          n.group = k,
+                          group.mesh = tmesh)
+
+# Create lgcp stack
+n <- nrow(dat[dat$year_i == 5,]) # number of locations
+m <- barrier.model$f$n # number of mesh nodes
+
+y <- rep(0:1, c(k * m, n))
+expected <- c(st.vol, rep(0, n))
+
+stk_5 <- inla.stack(
+  data = list(y = y,
+              expect = expected), 
+  A = list(rbind(Diagonal(n = k * m), Ast_5), 1), 
+  effects = list(idx,
+                 list(a0 = rep(1, (k * m) + n),
+                      ice = ice_5)))
+
+# join stacks together
+stk <- inla.stack(stk_1, stk_2, stk_3, stk_5)
+```
+
+### Prior specification and model formula
+
+``` r
+# PC prior on time mesh
+pcrho <- list(prior = 'pccor1', param = c(0.7, 0.7))
+
+form_2 <- y ~ 0 + a0 + f(inla.group(ice, n = 25, method = "cut"),
+                         model = "rw2",
+                         scale.model = T,
+                         hyper = list(theta = list(prior="pc.prec", param=c(10, 0.01)))) + 
+  f(s,
+    model = barrier.model,
+    group = s.group,
+    control.group = list(model = 'ar1',
+                         hyper = list(theta = pcrho)))
+```
+
+### Fit the model
+
+NB. This takes around 4 hours on a 2.7 GHz Intel i5 with 16GB RAM
+
+``` r
+# fit the model
+#barrier_fit_stk_ice_rw <- inla(form_2,
+#                               family = 'poisson',
+#                               data = inla.stack.data(stk),
+#                               E = inla.stack.data(stk)$e,
+#                               control.predictor = list(A = inla.stack.A(stk)),
+#                               control.inla = list(strategy = 'adaptive'),
+#                               control.compute = list(dic = T,
+#                                                      waic = T,
+#                                                      config = T),
+#                               verbose = F)
+```
