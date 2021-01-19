@@ -28,7 +28,6 @@ require(INLA)
 require(inlabru)
 require(tidyverse)
 require(sf)
-require(viridis)
 require(raster)
 require(rgeos)
 
@@ -221,14 +220,22 @@ stk <- inla.stack(stk_1, stk_2, stk_3, stk_5)
 
 ### Prior specification and model formula
 
+Due to the large number of unique covariate values, use the `inla.group`
+function.
+
 ``` r
 # PC prior on time mesh
 pcrho <- list(prior = 'pccor1', param = c(0.7, 0.7))
 
-form_2 <- y ~ 0 + a0 + f(inla.group(ice, n = 25, method = "cut"),
-                         model = "rw2",
-                         scale.model = T,
-                         hyper = list(theta = list(prior="pc.prec", param=c(10, 0.01)))) + 
+# formula for lgcp with ice covariate and barrier model spde
+form <- y ~ 0 + a0 + 
+  f(inla.group(ice,
+               n = 25,
+               method = "cut"),
+    model = "rw2",
+    scale.model = T,
+    hyper = list(theta = list(prior="pc.prec",
+                              param=c(10, 0.01)))) + 
   f(s,
     model = barrier.model,
     group = s.group,
@@ -242,14 +249,14 @@ NB. This takes around 4 hours on a 2.7 GHz Intel i5 with 16GB RAM
 
 ``` r
 # fit the model
-#barrier_fit_stk_ice_rw <- inla(form_2,
-#                               family = 'poisson',
-#                               data = inla.stack.data(stk),
-#                               E = inla.stack.data(stk)$e,
-#                               control.predictor = list(A = inla.stack.A(stk)),
-#                               control.inla = list(strategy = 'adaptive'),
-#                               control.compute = list(dic = T,
-#                                                      waic = T,
-#                                                      config = T),
-#                               verbose = F)
+fit <- inla(form,
+            family = 'poisson',
+            data = inla.stack.data(stk),
+            E = inla.stack.data(stk)$e,
+            control.predictor = list(A = inla.stack.A(stk)),
+            control.inla = list(strategy = 'adaptive'),
+            control.compute = list(dic = T,
+                                   waic = T,
+                                   config = T),
+            verbose = T)
 ```
