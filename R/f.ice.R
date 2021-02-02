@@ -17,7 +17,6 @@ f.ice <- function(x, y, season, year) {
     # with the appropriate coordinate reference system (CRS)
     # and the appropriate time indices
     spp <- SpatialPoints(coords = cbind(x = x[t == tt], y = y[t == tt]), proj4string = fm_sp_get_crs(ice))
-    proj4string(spp) <- fm_sp_get_crs(ice)
 
     # Subset raster stack at correct time index
     ice_sub <- raster::subset(ice, tt)
